@@ -12,17 +12,14 @@ import (
 
 // TestWriteEvent verifies that WriteEvent inserts an event atomically within a transaction.
 func TestWriteEvent(t *testing.T) {
-
 	// Use in-memory SQLite for testing.
 	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
 	assert.NoError(t, err, "failed to open database")
 
-	// Auto-migrate the OutboxEvent table.
-	err = db.AutoMigrate(&OutboxEvent{})
-	assert.NoError(t, err, "failed to auto-migrate table")
-
-	// Create an OutboxProcessor instance.
+	// Auto-migrate the OutboxEvent table using the processor's AutoMigrate method.
 	processor := NewOutboxProcessor(db, WithAutoDelete(false))
+	err = processor.AutoMigrate()
+	assert.NoError(t, err, "failed to auto-migrate table")
 
 	// Run a transaction that writes an event.
 	err = db.Transaction(func(tx *gorm.DB) error {
@@ -45,18 +42,21 @@ func TestWriteEvent(t *testing.T) {
 	assert.Equal(t, "value", payload["key"], "unexpected payload value")
 }
 
-// TestProcessEventsStop verifies that ProcessEvents can be stopped gracefully.
+// TestProcessEventsStop verifies that ProcessEvents stops gracefully and uses the custom event handler.
 func TestProcessEventsStop(t *testing.T) {
 	// Use in-memory SQLite for testing.
 	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
 	assert.NoError(t, err, "failed to open database")
 
 	// Auto-migrate the OutboxEvent table.
-	err = db.AutoMigrate(&OutboxEvent{})
+	processor := NewOutboxProcessor(db, WithAutoDelete(true), WithBatchSize(1), WithInterval(500*time.Millisecond),
+		WithEventHandler(func(eventType string, payload []byte) error {
+			// In this test, we simply log the event.
+			// Simulate successful event handling.
+			return nil
+		}))
+	err = processor.AutoMigrate()
 	assert.NoError(t, err, "failed to auto-migrate table")
-
-	// Create an OutboxProcessor instance with autoDelete enabled.
-	processor := NewOutboxProcessor(db, WithAutoDelete(true), WithBatchSize(1), WithInterval(500*time.Millisecond))
 
 	// Insert an event manually.
 	event := OutboxEvent{

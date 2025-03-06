@@ -23,9 +23,12 @@ type OutboxEvent struct {
 // OutboxProcessor handles the outbox mechanism: writing and processing outbox events.
 type OutboxProcessor struct {
 	db         *gorm.DB
-	autoDelete bool          // if true, events will be deleted after successful MQ delivery; otherwise, status is updated to "sent"
+	autoDelete bool          // if true, events will be deleted after successful handling; otherwise, status is updated to "sent"
 	batchSize  int           // number of events to process per batch
 	interval   time.Duration // polling interval between processing batches
+
+	// eventHandler is a customizable function to process events.
+	eventHandler func(eventType string, payload []byte) error
 
 	// Internal context and cancel function to control background processing.
 	ctx    context.Context
@@ -35,7 +38,7 @@ type OutboxProcessor struct {
 // Option is a functional option type for configuring OutboxProcessor.
 type Option func(*OutboxProcessor)
 
-// WithAutoDelete configures whether to auto-delete events after successful delivery.
+// WithAutoDelete configures whether to auto-delete events after successful handling.
 func WithAutoDelete(autoDelete bool) Option {
 	return func(op *OutboxProcessor) {
 		op.autoDelete = autoDelete
@@ -56,6 +59,13 @@ func WithInterval(d time.Duration) Option {
 	}
 }
 
+// WithEventHandler allows you to provide a custom function to handle events.
+func WithEventHandler(handler func(eventType string, payload []byte) error) Option {
+	return func(op *OutboxProcessor) {
+		op.eventHandler = handler
+	}
+}
+
 // NewOutboxProcessor creates a new OutboxProcessor instance with the provided options.
 // It also initializes an internal context and cancel function.
 func NewOutboxProcessor(db *gorm.DB, opts ...Option) *OutboxProcessor {
@@ -63,16 +73,27 @@ func NewOutboxProcessor(db *gorm.DB, opts ...Option) *OutboxProcessor {
 	ctx, cancel := context.WithCancel(context.Background())
 	processor := &OutboxProcessor{
 		db:         db,
-		autoDelete: false,           // default is to update status instead of deletion
+		autoDelete: false,           // default: update status instead of deletion
 		batchSize:  10,              // default batch size is 10
 		interval:   3 * time.Second, // default polling interval is 3 seconds
 		ctx:        ctx,
 		cancel:     cancel,
+		// Default eventHandler function.
+		eventHandler: func(eventType string, payload []byte) error {
+			log.Printf("Handling event: type=%s, payload=%s", eventType, payload)
+			// Simulate successful event handling.
+			return nil
+		},
 	}
 	for _, opt := range opts {
 		opt(processor)
 	}
 	return processor
+}
+
+// AutoMigrate runs auto migration for the OutboxEvent table.
+func (op *OutboxProcessor) AutoMigrate() error {
+	return op.db.AutoMigrate(&OutboxEvent{})
 }
 
 // WriteEvent writes an outbox event using the provided transaction.
@@ -93,14 +114,6 @@ func (op *OutboxProcessor) WriteEvent(tx *gorm.DB, eventType string, payload int
 	return tx.Create(&event).Error
 }
 
-// sendToMQ simulates sending an event to a message queue.
-// Replace this with your actual MQ client logic.
-func sendToMQ(eventType string, payload []byte) error {
-	log.Printf("Sending MQ event: type=%s, payload=%s", eventType, payload)
-	// Simulate a successful send.
-	return nil
-}
-
 // ProcessEvents continuously polls and processes pending outbox events.
 // It will stop processing when the internal context is cancelled.
 func (op *OutboxProcessor) ProcessEvents() {
@@ -110,7 +123,7 @@ func (op *OutboxProcessor) ProcessEvents() {
 			log.Println("Stopping outbox event processing.")
 			return
 		default:
-			// Proceed with processing.
+			// Continue processing.
 		}
 
 		var events []OutboxEvent
@@ -138,8 +151,8 @@ func (op *OutboxProcessor) ProcessEvents() {
 
 		// Process each event.
 		for _, event := range events {
-			if err := sendToMQ(event.EventType, event.Payload); err != nil {
-				log.Printf("Failed to send event ID %d: %v", event.ID, err)
+			if err := op.eventHandler(event.EventType, event.Payload); err != nil {
+				log.Printf("Failed to handle event ID %d: %v", event.ID, err)
 				continue
 			}
 
@@ -148,7 +161,7 @@ func (op *OutboxProcessor) ProcessEvents() {
 				if err := op.db.Delete(&event).Error; err != nil {
 					log.Printf("Failed to delete event ID %d: %v", event.ID, err)
 				} else {
-					log.Printf("Event ID %d sent successfully and deleted", event.ID)
+					log.Printf("Event ID %d processed successfully and deleted", event.ID)
 				}
 			} else {
 				// Otherwise, update the event status to "sent" and record the sent time.
@@ -158,7 +171,7 @@ func (op *OutboxProcessor) ProcessEvents() {
 				}).Error; err != nil {
 					log.Printf("Failed to update event ID %d: %v", event.ID, err)
 				} else {
-					log.Printf("Event ID %d sent successfully and status updated", event.ID)
+					log.Printf("Event ID %d processed successfully and status updated", event.ID)
 				}
 			}
 		}
