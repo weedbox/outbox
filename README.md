@@ -38,7 +38,7 @@ go get -u gorm.io/driver/postgres
 
 ### Initializing OutboxProcessor
 
-First, set up your PostgreSQL connection and auto-migrate the outbox_events table. Then, create an instance of OutboxProcessor with your desired configuration:
+First, set up your PostgreSQL connection and auto-migrate the outbox_events table. Then, create an instance of OutboxProcessor with your desired configuration and custom event handler if needed:
 
 ```go
 dsn := "host=localhost user=postgres password=yourpassword dbname=yourdb port=5432 sslmode=disable TimeZone=Asia/Taipei"
@@ -52,7 +52,18 @@ if err := db.AutoMigrate(&OutboxEvent{}); err != nil {
     log.Fatalf("Failed to auto-migrate table: %v", err)
 }
 
-processor := NewOutboxProcessor(db, WithAutoDelete(true), WithBatchSize(10), WithInterval(3*time.Second))
+// Create an OutboxProcessor instance with custom settings.
+// Here we provide a custom event handler function using WithEventHandler.
+processor := NewOutboxProcessor(db,
+    WithAutoDelete(true),
+    WithBatchSize(10),
+    WithInterval(3*time.Second),
+    WithEventHandler(func(eventType string, payload []byte) error {
+        log.Printf("Custom event handler: type=%s, payload=%s", eventType, payload)
+        // Insert your custom logic here (e.g., send the event to an MQ)
+        return nil
+    }),
+)
 ```
 
 ### Writing an Outbox Event Within a Transaction
