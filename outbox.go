@@ -23,6 +23,7 @@ type OutboxEvent struct {
 // OutboxProcessor handles the outbox mechanism: writing and processing outbox events.
 type OutboxProcessor struct {
 	db         *gorm.DB
+	tableName  string        // table name for outbox events
 	autoDelete bool          // if true, events will be deleted after successful handling; otherwise, status is updated to "sent"
 	batchSize  int           // number of events to process per batch
 	interval   time.Duration // polling interval between processing batches
@@ -66,6 +67,14 @@ func WithEventHandler(handler func(eventType string, payload []byte) error) Opti
 	}
 }
 
+// WithTableName allows you to specify a custom table name for the outbox events.
+func WithTableName(name string) Option {
+	return func(op *OutboxProcessor) {
+		op.tableName = name
+		op.db = op.db.Table(name)
+	}
+}
+
 // NewOutboxProcessor creates a new OutboxProcessor instance with the provided options.
 // It also initializes an internal context and cancel function.
 func NewOutboxProcessor(db *gorm.DB, opts ...Option) *OutboxProcessor {
@@ -73,6 +82,7 @@ func NewOutboxProcessor(db *gorm.DB, opts ...Option) *OutboxProcessor {
 	ctx, cancel := context.WithCancel(context.Background())
 	processor := &OutboxProcessor{
 		db:         db,
+		tableName:  "outbox_events", // default table name
 		autoDelete: false,           // default: update status instead of deletion
 		batchSize:  10,              // default batch size is 10
 		interval:   3 * time.Second, // default polling interval is 3 seconds
@@ -111,7 +121,7 @@ func (op *OutboxProcessor) WriteEvent(tx *gorm.DB, eventType string, payload int
 		CreatedAt: time.Now(),
 	}
 
-	return tx.Create(&event).Error
+	return tx.Table(op.tableName).Create(&event).Error
 }
 
 // ProcessEvents continuously polls and processes pending outbox events in a single transaction.

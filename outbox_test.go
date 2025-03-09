@@ -97,7 +97,7 @@ func TestRetryEvents(t *testing.T) {
 	assert.NoError(t, err, "failed to open database")
 
 	failures := 0
-	processor := NewOutboxProcessor(db, WithAutoDelete(true), WithBatchSize(10), WithInterval(500*time.Millisecond),
+	processor := NewOutboxProcessor(db, WithTableName("test_outbox_events"), WithAutoDelete(true), WithBatchSize(10), WithInterval(500*time.Millisecond),
 		WithEventHandler(func(eventType string, payload []byte) error {
 			if failures < 3 {
 
@@ -141,7 +141,7 @@ func TestRetryEvents(t *testing.T) {
 
 	// Verify that the event has been processed and deleted.
 	var count int64
-	err = db.Model(&OutboxEvent{}).Count(&count).Error
+	err = db.Table("test_outbox_events").Count(&count).Error
 	assert.NoError(t, err, "failed to count events")
 	assert.Equal(t, int64(0), count, "expected event to be deleted")
 }
