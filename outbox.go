@@ -114,67 +114,74 @@ func (op *OutboxProcessor) WriteEvent(tx *gorm.DB, eventType string, payload int
 	return tx.Create(&event).Error
 }
 
-// ProcessEvents continuously polls and processes pending outbox events.
-// It will stop processing when the internal context is cancelled.
+// ProcessEvents continuously polls and processes pending outbox events in a single transaction.
+// The transaction wraps both the event fetching (with SKIP LOCKED), the event handling via the custom eventHandler,
+// and the finalization (update or deletion) of the events. This ensures that once the transaction commits,
+// the events have been finalized and cannot be picked up by another worker.
 func (op *OutboxProcessor) ProcessEvents() {
 	for {
 		select {
 		case <-op.ctx.Done():
-			log.Println("Stopping outbox event processing.")
 			return
 		default:
 			// Continue processing.
 		}
 
-		var events []OutboxEvent
-
-		// Begin a transaction and use FOR UPDATE SKIP LOCKED to lock rows for processing.
-		tx := op.db.Begin()
-		err := tx.
-			Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
-			Where("status = ?", "pending").
-			Limit(op.batchSize).
-			Find(&events).Error
-		if err != nil {
-			tx.Rollback()
-			log.Printf("Failed to query outbox events: %v", err)
-			time.Sleep(op.interval)
-			continue
-		}
-		tx.Commit()
-
-		// If no events are found, wait for the next polling cycle.
-		if len(events) == 0 {
-			time.Sleep(op.interval)
-			continue
-		}
-
-		// Process each event.
-		for _, event := range events {
-			if err := op.eventHandler(event.EventType, event.Payload); err != nil {
-				log.Printf("Failed to handle event ID %d: %v", event.ID, err)
-				continue
+		// Wrap fetching, processing, and finalization in one transaction.
+		err := op.db.Transaction(func(tx *gorm.DB) error {
+			var events []OutboxEvent
+			// Fetch events with status "pending" using SKIP LOCKED.
+			if err := tx.
+				Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
+				Where("status = ?", "pending").
+				Limit(op.batchSize).
+				Find(&events).Error; err != nil {
+				return err
 			}
 
+			// If no events are found, simply return nil.
+			if len(events) == 0 {
+				return nil
+			}
+
+			handledEvents := make([]uint, 0, len(events))
+
+			// Process each event and finalize it within the same transaction.
+			for _, event := range events {
+				// Handle the event using the custom event handler.
+				if err := op.eventHandler(event.EventType, event.Payload); err != nil {
+					continue
+				}
+
+				// Keep track of the handled events to finalize them later.
+				handledEvents = append(handledEvents, event.ID)
+			}
+
+			// Finalize the event by either deleting it or updating its status to "sent".
 			if op.autoDelete {
-				// Delete the event if autoDelete is enabled.
-				if err := op.db.Delete(&event).Error; err != nil {
-					log.Printf("Failed to delete event ID %d: %v", event.ID, err)
-				} else {
-					log.Printf("Event ID %d processed successfully and deleted", event.ID)
+				if err := tx.Unscoped().Where("id IN ?", handledEvents).Delete(&OutboxEvent{}).Error; err != nil {
+					return err
 				}
 			} else {
-				// Otherwise, update the event status to "sent" and record the sent time.
-				if err := op.db.Model(&event).Updates(map[string]interface{}{
-					"status":  "sent",
-					"sent_at": time.Now(),
-				}).Error; err != nil {
-					log.Printf("Failed to update event ID %d: %v", event.ID, err)
-				} else {
-					log.Printf("Event ID %d processed successfully and status updated", event.ID)
+
+				if err := tx.Model(&OutboxEvent{}).
+					Where("id IN ?", handledEvents).
+					Updates(map[string]interface{}{
+						"status":  "sent",
+						"sent_at": time.Now(),
+					}).Error; err != nil {
+					return err
 				}
 			}
+
+			return nil
+		})
+
+		if err != nil {
+			log.Printf("Failed to process events: %v", err)
 		}
+
+		time.Sleep(op.interval)
 	}
 }
 
